@@ -7,6 +7,8 @@ from rest_framework.exceptions import ValidationError, AuthenticationFailed
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from user.models import Provider
+
 User = get_user_model()
 
 
@@ -113,3 +115,9 @@ class UserTokenRefreshSerializer(serializers.Serializer):
 
     def get_user(self, refresh):
         return User.objects.get(id=refresh.get('user_id'))
+
+
+class ProviderSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Provider
+        fields = ('id', 'provider_name',)
