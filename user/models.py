@@ -1,5 +1,5 @@
 from django.contrib.auth.base_user import AbstractBaseUser
-from django.contrib.auth.models import PermissionsMixin
+from django.contrib.auth.models import PermissionsMixin, UserManager
 from django.contrib.gis.db import models
 
 from common.models import TimeStampModel
@@ -30,6 +30,8 @@ class User(
     is_staff = models.BooleanField(
         default=False,
     )
+
+    objects = UserManager()
 
     USERNAME_FIELD = 'username'
     EMAIL_FIELD = 'email'
