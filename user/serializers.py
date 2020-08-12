@@ -2,9 +2,9 @@ import re
 
 from django.contrib.auth import get_user_model, authenticate
 from django.contrib.auth.hashers import make_password
-from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError, AuthenticationFailed
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
 User = get_user_model()
@@ -81,10 +81,35 @@ class UserTokenObtainSerializer(serializers.Serializer):
         attrs['authenticated_user'] = authenticated_user
         return attrs
 
-    def get_token(self, user):
+    def get_token_pair(self, user):
         refresh = RefreshToken.for_user(user)
 
         return dict(
             refresh=str(refresh),
             access=str(refresh.access_token)
         )
+
+
+class UserTokenRefreshSerializer(serializers.Serializer):
+    refresh = serializers.CharField()
+
+    def validate(self, attrs):
+        try:
+            refresh = RefreshToken(attrs['refresh'])
+        except TokenError:
+            raise AuthenticationFailed('만료되었거나 유효하지 않은 토큰 값입니다')
+
+        if not User.objects.filter(
+                id=refresh.get('user_id'),
+                is_active=True,
+        ).exists():
+            raise AuthenticationFailed('유효하지 않은 토큰입니다')
+
+        attrs['refresh'] = refresh
+        return attrs
+
+    def get_access_token(self, refresh):
+        return dict(access=str(refresh.access_token))
+
+    def get_user(self, refresh):
+        return User.objects.get(id=refresh.get('user_id'))
