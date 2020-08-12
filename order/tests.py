@@ -1,5 +1,6 @@
 import json
 
+from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
 from common.cache import has_obtained_redis_lock, release_redis_lock
@@ -8,6 +9,7 @@ from order.cache_keys import CART_CREATE_LOCK_USER_
 from order.models import Cart
 from product.models import Product, ProductOption
 
+User = get_user_model()
 
 class TestMeCartListCreateAPIViewPOST(ToyTestCase):
     api_url = '/users/me/carts'
@@ -234,3 +236,103 @@ class TestMeCartListCreateAPIViewPOST(ToyTestCase):
         self.assertEqual(response.status_code, 423)
         self.assertEqual(count_query.count(), cart_count_before_cart_create + 0)
         self.assertEqual(response.json(), '처리중입니다.')
+
+
+class TestMeCartListCreateAPIViewGET(ToyTestCase):
+    api_url = '/users/me/carts'
+
+    def setUp(self):
+        self.client = APIClient()
+        self.me = self.create_normal_user()
+        self.another_user = User.objects.create_user(
+            username='another_user',
+            password='toyproject12!@',
+            name='아무나',
+            email='anybody@any.body',
+            phone_number='01012344321',
+        )
+
+        self.provider = self.create_provider(
+            username='Ably',
+            name='Ably',
+            phone_number='01033333333',
+            email='ddd@naver.com',
+        )
+
+        self.product1 = Product.objects.create(
+            provider=self.provider,
+            name='product1',
+            price=3000,
+            shipping_price=0,
+            is_on_sale=True,
+            can_bundle=True,
+        )
+        self.product1_option = ProductOption.objects.create(
+            product=self.product1,
+            stock=10,
+            name='anything'
+        )
+
+        self.product2 = Product.objects.create(
+            provider=self.provider,
+            name='product2',
+            price=3000,
+            shipping_price=0,
+            is_on_sale=True,
+            can_bundle=True,
+        )
+        self.product2_option = ProductOption.objects.create(
+            product=self.product2,
+            stock=10,
+            name='anything'
+        )
+
+        self.me_cart_option1 = Cart.objects.create(
+            user=self.me,
+            product_option=self.product1_option,
+            quantity=1
+        )
+        self.me_cart_option2 = Cart.objects.create(
+            user=self.me,
+            product_option=self.product2_option,
+            quantity=1,
+        )
+
+        self.another_user_cart_option1 = Cart.objects.create(
+            user=self.another_user,
+            product_option=self.product1_option,
+            quantity=1
+        )
+        self.another_user_cart_option2 = Cart.objects.create(
+            user=self.another_user,
+            product_option=self.product2_option,
+            quantity=1
+        )
+
+    def test_로그인한_사용자가_본인_장바구니_리스트를_보면_다른_사용자의_장바구니_리스트는_나오지_않고_200_성공(self):
+        self.client.force_authenticate(user=self.me)
+        response = self.client.get(path=self.api_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['count'], Cart.objects.filter(user=self.me).count())
+        self.assertEqual(
+            set(response.json()['results'][0]),
+            {'id', 'user_id', 'quantity', 'product_option'}
+        )
+        self.assertEqual(
+            set(response.json()['results'][0]['product_option']),
+            {'id', 'stock', 'name', 'product'}
+        )
+        self.assertEqual(
+            set(response.json()['results'][0]['product_option']['product']),
+            {
+                'id', 'name', 'price', 'shipping_price',
+                'is_on_sale', 'can_bundle', 'created_at', 'updated_at', 'provider',
+            }
+        )
+
+    def test_로그인하지_않은_사용자가_장바구니_리스트를_확인하려고_할_시_401_에러(self):
+        response = self.client.get(path=self.api_url)
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {'detail': '자격 인증데이터(authentication credentials)가 제공되지 않았습니다.'})
