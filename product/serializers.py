@@ -22,3 +22,22 @@ class ProductSerializer(serializers.ModelSerializer):
             'id', 'name', 'price', 'shipping_price',
             'is_on_sale', 'can_bundle', 'created_at', 'updated_at', 'provider', 'options',
         )
+
+
+class ProductWithoutOptionsSerializer(ProductSerializer):
+    class Meta:
+        model = Product
+        fields = (
+            'id', 'name', 'price', 'shipping_price',
+            'is_on_sale', 'can_bundle', 'created_at', 'updated_at', 'provider',
+        )
+
+
+class ProductOptionWithProductSerializer(ProductOptionSerializer):
+    product = ProductWithoutOptionsSerializer()
+
+    class Meta:
+        model = ProductOption
+        fields = (
+            'id', 'stock', 'name', 'product',
+        )
