@@ -43,3 +43,23 @@ class User(
 
     def __str__(self):
         return f'{self.username}/{self.phone_number}'
+
+
+class Provider(models.Model):
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name='provider',
+    )
+    provider_name = models.CharField(
+        max_length=50,
+        unique=True,
+    )
+
+    class Meta:
+        db_table = 'provider'
+        verbose_name = '입점사(상품 등록자)'
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        return self.provider_name
