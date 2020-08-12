@@ -1,9 +1,11 @@
 import re
 
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, authenticate
 from django.contrib.auth.hashers import make_password
+from django.utils import timezone
 from rest_framework import serializers
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, AuthenticationFailed
+from rest_framework_simplejwt.tokens import RefreshToken
 
 User = get_user_model()
 
@@ -49,12 +51,6 @@ class UserSerializer(serializers.ModelSerializer):
             raise ValidationError('01000000000 의 형태로 입력 해주세요.')
         return phone_number
 
-    def validate_sex(self, sex):
-        try:
-            return getattr(User.SEX_CHOICES, sex)
-        except AttributeError:
-            raise ValidationError('"MALE" 또는 "FEMALE" 중 하나를 입력 해주세요.')
-
     def validate(self, attrs):
         password = attrs['password']
         password2 = attrs['password2']
@@ -66,3 +62,29 @@ class UserSerializer(serializers.ModelSerializer):
         del attrs['password2']
 
         return attrs
+
+
+class UserTokenObtainSerializer(serializers.Serializer):
+    username = serializers.CharField()
+    password = serializers.CharField()
+
+    def validate(self, attrs):
+        authenticated_user = authenticate(
+            request=self.context.get('request'),
+            username=attrs['username'],
+            password=attrs['password'],
+        )
+
+        if not authenticated_user or not authenticated_user.is_active:
+            raise AuthenticationFailed()
+
+        attrs['authenticated_user'] = authenticated_user
+        return attrs
+
+    def get_token(self, user):
+        refresh = RefreshToken.for_user(user)
+
+        return dict(
+            refresh=str(refresh),
+            access=str(refresh.access_token)
+        )
