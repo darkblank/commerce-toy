@@ -23,8 +23,15 @@ class MeCartSerializer(serializers.ModelSerializer):
         )
 
     def validate(self, attrs):
+        if Cart.objects.filter(
+                user=self.context['request'].user,
+                product_option=attrs['product_option'],
+        ).exists():
+            raise ValidationError('이미 장바구니에 있는 상품 옵션입니다.')
+
         if attrs['product_option'].stock < attrs['quantity']:
             raise ValidationError('해당 옵션의 재고가 부족합니다.')
+
         return attrs
 
     def create(self, validated_data):
