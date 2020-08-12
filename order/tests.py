@@ -5,11 +5,12 @@ from rest_framework.test import APIClient
 
 from common.cache import has_obtained_redis_lock, release_redis_lock
 from common.tests import ToyTestCase
-from order.cache_keys import CART_CREATE_LOCK_USER_
-from order.models import Cart
+from order.cache_keys import CART_CREATE_LOCK_USER_, ORDER_CREATE_LOCK_USER_
+from order.models import Cart, OrderProduct, Payment, Order
 from product.models import Product, ProductOption
 
 User = get_user_model()
+
 
 class TestMeCartListCreateAPIViewPOST(ToyTestCase):
     api_url = '/users/me/carts'
@@ -336,3 +337,481 @@ class TestMeCartListCreateAPIViewGET(ToyTestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json(), {'detail': '자격 인증데이터(authentication credentials)가 제공되지 않았습니다.'})
+
+
+class TestMeOrderCreateAPIViewPOST(ToyTestCase):
+    api_url = '/users/me/orders'
+
+    def setUp(self):
+        self.client = APIClient()
+        self.me = self.create_normal_user()
+        self.provider1 = self.create_provider(
+            username='Ably',
+            name='Ably',
+            phone_number='01033333333',
+            email='ddd@naver.com',
+        )
+        self.provider2 = self.create_provider(
+            username='zigzag',
+            name='셀럽입점사',
+            phone_number='01033334444',
+            email='aaa@naver.com',
+        )
+
+        self.product1 = Product.objects.create(
+            provider=self.provider1,
+            name='product1',
+            price=3000,
+            shipping_price=2000,
+            is_on_sale=True,
+            can_bundle=True,
+        )
+        self.product1_option1 = ProductOption.objects.create(
+            product=self.product1,
+            stock=10,
+            name='anything',
+        )
+
+        self.product2 = Product.objects.create(
+            provider=self.provider1,
+            name='product2',
+            price=3000,
+            shipping_price=3000,
+            is_on_sale=True,
+            can_bundle=True,
+        )
+        self.product2_option1 = ProductOption.objects.create(
+            product=self.product2,
+            stock=10,
+            name='anything',
+        )
+
+        self.product3 = Product.objects.create(
+            provider=self.provider2,
+            name='product3',
+            price=3000,
+            shipping_price=2000,
+            is_on_sale=True,
+            can_bundle=True,
+        )
+        self.product3_option1 = ProductOption.objects.create(
+            product=self.product3,
+            stock=10,
+            name='anything',
+        )
+
+        self.product4 = Product.objects.create(
+            provider=self.provider2,
+            name='product4',
+            price=3000,
+            shipping_price=2000,
+            is_on_sale=True,
+            can_bundle=False,
+        )
+        self.product4_option1 = ProductOption.objects.create(
+            product=self.product4,
+            stock=10,
+            name='anything',
+        )
+
+        self.me_cart_option1 = Cart.objects.create(
+            user=self.me,
+            product_option=self.product1_option1,
+            quantity=1,
+        )
+        self.me_cart_option2 = Cart.objects.create(
+            user=self.me,
+            product_option=self.product2_option1,
+            quantity=5,
+        )
+        self.me_cart_option3 = Cart.objects.create(
+            user=self.me,
+            product_option=self.product3_option1,
+            quantity=5,
+        )
+        self.me_cart_option4 = Cart.objects.create(
+            user=self.me,
+            product_option=self.product4_option1,
+            quantity=5,
+        )
+
+    def test_로그인한_사용자가_본인_장바구니에_있는_상품옵션들을_주문하려고_할_때_재고가_있으면_주문_201_성공(self):
+        order_count_query = Order.objects.filter(user=self.me)
+        order_product_count_query = OrderProduct.objects.filter(user=self.me)
+        payment_count_query = Payment.objects.filter(order__user=self.me)
+        order_count_before_order_create = order_count_query.count()
+        order_product_count_before_order_create = order_product_count_query.count()
+        payment_count_before_order_create = payment_count_query.count()
+        cart_ids_to_order = [
+            self.me_cart_option1.id, self.me_cart_option2.id, self.me_cart_option3.id, self.me_cart_option4.id
+        ]
+
+        self.client.force_authenticate(user=self.me)
+        response = self.client.post(
+            path=self.api_url,
+            content_type='application/json',
+            data=json.dumps({
+                'cart_ids': cart_ids_to_order,
+                'shipping_address': '서울시 동작구 아무곳이나',
+                'shipping_request_note': '경비실에 맡겨주세요',
+                'pay_method': 'CARD',
+            })
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(order_count_query.count(), order_count_before_order_create + 1)
+        self.assertEqual(
+            order_product_count_query.count(),
+            order_product_count_before_order_create + len(cart_ids_to_order)
+        )
+        self.assertEqual(payment_count_query.count(), payment_count_before_order_create + 1)
+        self.assertEqual(
+            set(response.json()),
+            {
+                'id', 'order_uid', 'shipping_price', 'shipping_address', 'shipping_request_note',
+                'created_at', 'updated_at', 'is_paid', 'user', 'order_products', 'payment',
+            }
+        )
+        final_shipping_price = (
+                min(
+                    self.me_cart_option1.product_option.product.shipping_price,
+                    self.me_cart_option2.product_option.product.shipping_price
+                )
+                + self.me_cart_option3.product_option.product.shipping_price
+                + self.me_cart_option4.product_option.product.shipping_price
+        )
+
+        self.assertEqual(
+            response.json()['shipping_price'],
+            final_shipping_price,
+        )
+        self.assertEqual(
+            response.json()['payment']['pay_price'],
+            (self.me_cart_option1.quantity * self.me_cart_option1.product_option.product.price)
+            + (self.me_cart_option2.quantity * self.me_cart_option2.product_option.product.price)
+            + (self.me_cart_option3.quantity * self.me_cart_option3.product_option.product.price)
+            + (self.me_cart_option4.quantity * self.me_cart_option4.product_option.product.price)
+            + final_shipping_price
+        )
+
+    def test_로그인한_사용자가_본인_장바구니에_있는_상품옵션들을_주문하려고_할_때_재고가_있으면_주문을_여러번_해도_201_성공(self):
+        cart_ids_to_order = [
+            self.me_cart_option1.id, self.me_cart_option2.id, self.me_cart_option3.id, self.me_cart_option4.id
+        ]
+
+        self.client.force_authenticate(user=self.me)
+        self.client.post(
+            path=self.api_url,
+            content_type='application/json',
+            data=json.dumps({
+                'cart_ids': cart_ids_to_order,
+                'shipping_address': '서울시 동작구 아무곳이나',
+                'shipping_request_note': '경비실에 맡겨주세요',
+                'pay_method': 'CARD',
+            })
+        )
+        order_count_query = Order.objects.filter(user=self.me)
+        order_product_count_query = OrderProduct.objects.filter(user=self.me)
+        payment_count_query = Payment.objects.filter(order__user=self.me)
+        order_count_before_order_create = order_count_query.count()
+        order_product_count_before_order_create = order_product_count_query.count()
+        payment_count_before_order_create = payment_count_query.count()
+
+        response = self.client.post(
+            path=self.api_url,
+            content_type='application/json',
+            data=json.dumps({
+                'cart_ids': cart_ids_to_order,
+                'shipping_address': '서울시 동작구 아무곳이나',
+                'shipping_request_note': '경비실에 맡겨주세요',
+                'pay_method': 'CARD',
+            })
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(order_count_query.count(), order_count_before_order_create + 1)
+        self.assertEqual(
+            order_product_count_query.count(),
+            order_product_count_before_order_create + len(cart_ids_to_order)
+        )
+        self.assertEqual(payment_count_query.count(), payment_count_before_order_create + 1)
+        self.assertEqual(
+            set(response.json()),
+            {
+                'id', 'order_uid', 'shipping_price', 'shipping_address', 'shipping_request_note',
+                'created_at', 'updated_at', 'is_paid', 'user', 'order_products', 'payment',
+            }
+        )
+        final_shipping_price = (
+                min(
+                    self.me_cart_option1.product_option.product.shipping_price,
+                    self.me_cart_option2.product_option.product.shipping_price
+                )
+                + self.me_cart_option3.product_option.product.shipping_price
+                + self.me_cart_option4.product_option.product.shipping_price
+        )
+
+        self.assertEqual(
+            response.json()['shipping_price'],
+            final_shipping_price,
+        )
+        self.assertEqual(
+            response.json()['payment']['pay_price'],
+            (self.me_cart_option1.quantity * self.me_cart_option1.product_option.product.price)
+            + (self.me_cart_option2.quantity * self.me_cart_option2.product_option.product.price)
+            + (self.me_cart_option3.quantity * self.me_cart_option3.product_option.product.price)
+            + (self.me_cart_option4.quantity * self.me_cart_option4.product_option.product.price)
+            + final_shipping_price
+        )
+
+    def test_로그인하지_않은_사용자가_본인_장바구니에_있는_상품옵션들을_주문하려고_할_때_401_에러(self):
+        order_count_query = Order.objects.filter(user=self.me)
+        order_product_count_query = OrderProduct.objects.filter(user=self.me)
+        payment_count_query = Payment.objects.filter(order__user=self.me)
+        order_count_before_order_create = order_count_query.count()
+        order_product_count_before_order_create = order_product_count_query.count()
+        payment_count_before_order_create = payment_count_query.count()
+        cart_ids_to_order = [
+            self.me_cart_option1.id, self.me_cart_option2.id, self.me_cart_option3.id, self.me_cart_option4.id
+        ]
+
+        response = self.client.post(
+            path=self.api_url,
+            content_type='application/json',
+            data=json.dumps({
+                'cart_ids': cart_ids_to_order,
+                'shipping_address': '서울시 동작구 아무곳이나',
+                'shipping_request_note': '경비실에 맡겨주세요',
+                'pay_method': 'CARD',
+            })
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(order_count_query.count(), order_count_before_order_create + 0)
+        self.assertEqual(order_product_count_query.count(), order_product_count_before_order_create + 0)
+        self.assertEqual(payment_count_query.count(), payment_count_before_order_create + 0)
+        self.assertEqual(response.json(), {'detail': '자격 인증데이터(authentication credentials)가 제공되지 않았습니다.'})
+
+    def test_로그인한_사용자가_본인_장바구니에_있는_상품옵션들을_주문하려고_할_때_Required_Field를_Request_Body로_보내지_않으면_400_에러(self):
+        order_count_query = Order.objects.filter(user=self.me)
+        order_product_count_query = OrderProduct.objects.filter(user=self.me)
+        payment_count_query = Payment.objects.filter(order__user=self.me)
+        order_count_before_order_create = order_count_query.count()
+        order_product_count_before_order_create = order_product_count_query.count()
+        payment_count_before_order_create = payment_count_query.count()
+
+        self.client.force_authenticate(user=self.me)
+        response = self.client.post(
+            path=self.api_url,
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(order_count_query.count(), order_count_before_order_create + 0)
+        self.assertEqual(order_product_count_query.count(), order_product_count_before_order_create + 0)
+        self.assertEqual(payment_count_query.count(), payment_count_before_order_create + 0)
+        self.assertEqual(
+            response.json(),
+            {
+                'shipping_address': ['이 필드는 필수 항목입니다.'],
+                'cart_ids': ['이 필드는 필수 항목입니다.'],
+                'pay_method': ['이 필드는 필수 항목입니다.']
+            }
+        )
+
+    def test_로그인한_사용자가_본인_장바구니에_없는_상품옵션을_주문하려고하면_400_에러(self):
+        order_count_query = Order.objects.filter(user=self.me)
+        order_product_count_query = OrderProduct.objects.filter(user=self.me)
+        payment_count_query = Payment.objects.filter(order__user=self.me)
+        order_count_before_order_create = order_count_query.count()
+        order_product_count_before_order_create = order_product_count_query.count()
+        payment_count_before_order_create = payment_count_query.count()
+        cart_ids_to_order = [
+            3000, 4000, 5000
+        ]
+
+        self.client.force_authenticate(user=self.me)
+        response = self.client.post(
+            path=self.api_url,
+            content_type='application/json',
+            data=json.dumps({
+                'cart_ids': cart_ids_to_order,
+                'shipping_address': '서울시 동작구 아무곳이나',
+                'shipping_request_note': '경비실에 맡겨주세요',
+                'pay_method': 'CARD',
+            })
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(order_count_query.count(), order_count_before_order_create + 0)
+        self.assertEqual(order_product_count_query.count(), order_product_count_before_order_create + 0)
+        self.assertEqual(payment_count_query.count(), payment_count_before_order_create + 0)
+        self.assertEqual(response.json(), {'cart_ids': ['잘못된 cart id가 포함되어 있습니다.']})
+
+    def test_로그인한_사용자가_본인_장바구니에_있는_상품옵션을_주문하려고_할_때_허용되지_않은_결제수단을_사용하면_400_에러(self):
+        order_count_query = Order.objects.filter(user=self.me)
+        order_product_count_query = OrderProduct.objects.filter(user=self.me)
+        payment_count_query = Payment.objects.filter(order__user=self.me)
+        order_count_before_order_create = order_count_query.count()
+        order_product_count_before_order_create = order_product_count_query.count()
+        payment_count_before_order_create = payment_count_query.count()
+        cart_ids_to_order = [
+            self.me_cart_option1.id, self.me_cart_option2.id, self.me_cart_option3.id, self.me_cart_option4.id
+        ]
+
+        self.client.force_authenticate(user=self.me)
+        response = self.client.post(
+            path=self.api_url,
+            content_type='application/json',
+            data=json.dumps({
+                'cart_ids': cart_ids_to_order,
+                'shipping_address': '서울시 동작구 아무곳이나',
+                'shipping_request_note': '경비실에 맡겨주세요',
+                'pay_method': 'not_allowed_pay_method',
+            })
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(order_count_query.count(), order_count_before_order_create + 0)
+        self.assertEqual(order_product_count_query.count(), order_product_count_before_order_create + 0)
+        self.assertEqual(payment_count_query.count(), payment_count_before_order_create + 0)
+        self.assertEqual(response.json(), {'pay_method': ['올바른 pay_method를 입력 해주세요.']})
+
+    def test_로그인한_사용자가_본인_장바구니에_있는_상품옵션들을_주문하려고_할_때_재고가_없으면_주문_400_에러(self):
+        order_count_query = Order.objects.filter(user=self.me)
+        order_product_count_query = OrderProduct.objects.filter(user=self.me)
+        payment_count_query = Payment.objects.filter(order__user=self.me)
+        order_count_before_order_create = order_count_query.count()
+        order_product_count_before_order_create = order_product_count_query.count()
+        payment_count_before_order_create = payment_count_query.count()
+        self.product1_option1.stock = 0
+        self.product1_option1.save()
+        self.product2_option1.stock = 0
+        self.product2_option1.save()
+        self.product3_option1.stock = 0
+        self.product3_option1.save()
+        self.product4_option1.stock = 0
+        self.product4_option1.save()
+
+        cart_ids_to_order = [
+            self.me_cart_option1.id, self.me_cart_option2.id, self.me_cart_option3.id, self.me_cart_option4.id
+        ]
+
+        self.client.force_authenticate(user=self.me)
+        response = self.client.post(
+            path=self.api_url,
+            content_type='application/json',
+            data=json.dumps({
+                'cart_ids': cart_ids_to_order,
+                'shipping_address': '서울시 동작구 아무곳이나',
+                'shipping_request_note': '경비실에 맡겨주세요',
+                'pay_method': 'CARD',
+            })
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(order_count_query.count(), order_count_before_order_create + 0)
+        self.assertEqual(order_product_count_query.count(), order_product_count_before_order_create + 0)
+        self.assertEqual(payment_count_query.count(), payment_count_before_order_create + 0)
+        self.assertEqual(
+            response.json(),
+            {
+                'non_field_errors': [
+                    'product1/anything, product2/anything, product3/anything, product4/anything 의 재고가 부족합니다'
+                ]
+            }
+        )
+
+    def test_로그인한_사용자가_본인_장바구니에_있는_상품옵션을_주문할_때_다른_사용자_주문의_레디스_락과_상관없이_201_성공(self):
+        order_count_query = Order.objects.filter(user=self.me)
+        order_product_count_query = OrderProduct.objects.filter(user=self.me)
+        payment_count_query = Payment.objects.filter(order__user=self.me)
+        order_count_before_order_create = order_count_query.count()
+        order_product_count_before_order_create = order_product_count_query.count()
+        payment_count_before_order_create = payment_count_query.count()
+        cart_ids_to_order = [
+            self.me_cart_option1.id, self.me_cart_option2.id, self.me_cart_option3.id, self.me_cart_option4.id
+        ]
+
+        lock_key = ORDER_CREATE_LOCK_USER_('any_user_id')
+        has_obtained_redis_lock(lock_key, 5)
+        self.client.force_authenticate(user=self.me)
+        response = self.client.post(
+            path=self.api_url,
+            content_type='application/json',
+            data=json.dumps({
+                'cart_ids': cart_ids_to_order,
+                'shipping_address': '서울시 동작구 아무곳이나',
+                'shipping_request_note': '경비실에 맡겨주세요',
+                'pay_method': 'CARD',
+            })
+        )
+        release_redis_lock(lock_key)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(order_count_query.count(), order_count_before_order_create + 1)
+        self.assertEqual(
+            order_product_count_query.count(),
+            order_product_count_before_order_create + len(cart_ids_to_order)
+        )
+        self.assertEqual(payment_count_query.count(), payment_count_before_order_create + 1)
+        self.assertEqual(
+            set(response.json()),
+            {
+                'id', 'order_uid', 'shipping_price', 'shipping_address', 'shipping_request_note',
+                'created_at', 'updated_at', 'is_paid', 'user', 'order_products', 'payment',
+            }
+        )
+        final_shipping_price = (
+                min(
+                    self.me_cart_option1.product_option.product.shipping_price,
+                    self.me_cart_option2.product_option.product.shipping_price
+                )
+                + self.me_cart_option3.product_option.product.shipping_price
+                + self.me_cart_option4.product_option.product.shipping_price
+        )
+
+        self.assertEqual(
+            response.json()['shipping_price'],
+            final_shipping_price,
+        )
+        self.assertEqual(
+            response.json()['payment']['pay_price'],
+            (self.me_cart_option1.quantity * self.me_cart_option1.product_option.product.price)
+            + (self.me_cart_option2.quantity * self.me_cart_option2.product_option.product.price)
+            + (self.me_cart_option3.quantity * self.me_cart_option3.product_option.product.price)
+            + (self.me_cart_option4.quantity * self.me_cart_option4.product_option.product.price)
+            + final_shipping_price
+        )
+
+    def test_로그인한_사용자가_본인_장바구니에_있는_상품옵션을_주문하려고_할_때_중복_요청으로_이미_프로세스가_진행중인_경우_423_에러(self):
+        order_count_query = Order.objects.filter(user=self.me)
+        order_product_count_query = OrderProduct.objects.filter(user=self.me)
+        payment_count_query = Payment.objects.filter(order__user=self.me)
+        order_count_before_order_create = order_count_query.count()
+        order_product_count_before_order_create = order_product_count_query.count()
+        payment_count_before_order_create = payment_count_query.count()
+        cart_ids_to_order = [
+            self.me_cart_option1.id, self.me_cart_option2.id, self.me_cart_option3.id, self.me_cart_option4.id
+        ]
+
+        lock_key = ORDER_CREATE_LOCK_USER_(self.me.id)
+        has_obtained_redis_lock(lock_key, 5)
+        self.client.force_authenticate(user=self.me)
+        response = self.client.post(
+            path=self.api_url,
+            content_type='application/json',
+            data=json.dumps({
+                'cart_ids': cart_ids_to_order,
+                'shipping_address': '서울시 동작구 아무곳이나',
+                'shipping_request_note': '경비실에 맡겨주세요',
+                'pay_method': 'not_allowed_pay_method',
+            })
+        )
+        release_redis_lock(lock_key)
+
+        self.assertEqual(response.status_code, 423)
+        self.assertEqual(response.json(), '처리중입니다.')
+        self.assertEqual(order_count_query.count(), order_count_before_order_create + 0)
+        self.assertEqual(order_product_count_query.count(), order_product_count_before_order_create + 0)
+        self.assertEqual(payment_count_query.count(), payment_count_before_order_create + 0)
